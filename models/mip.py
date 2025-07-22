@@ -104,9 +104,59 @@ def cast_rays(t_samples, origins, directions, radii, ray_shape, diagonal=True):
 
 
 def sample_along_rays_360(origins, directions, radii, num_samples, near, far, randomized, disparity, ray_shape):
-    
-    # === CODE START ===
-    pass
+    """Stratified sampling for Mip-NeRF 360 scenes.
+
+    This helper mirrors :func:`sample_along_rays` but is kept separate for
+    potential customisations for unbounded scenes.  The implementation here
+    follows the stratified sampling strategy of the original mip-NeRF model.
+
+    Args:
+        origins: ``torch.Tensor`` of shape ``[batch_size, 3]`` containing the
+            ray origins.
+        directions: ``torch.Tensor`` of shape ``[batch_size, 3]`` containing
+            the ray directions.
+        radii: ``torch.Tensor`` of shape ``[batch_size, 1]`` with the ray
+            radii.
+        num_samples: ``int`` number of samples per ray.
+        near: ``torch.Tensor`` ``[batch_size, 1]`` near plane distances.
+        far: ``torch.Tensor`` ``[batch_size, 1]`` far plane distances.
+        randomized: ``bool`` indicating whether to apply randomized stratified
+            sampling.
+        disparity: ``bool`` if ``True`` sample linearly in disparity.
+        ray_shape: ``str`` describing the ray shape (``'cone'`` or ``'cylinder'``).
+
+    Returns:
+        ``t_samples`` – ``torch.Tensor`` of shape ``[batch_size, num_samples+1]``
+        containing the sampled distances along each ray.
+        ``(means, covs)`` – tuple where ``means`` has shape ``[batch_size,
+        num_samples, 3]`` and ``covs`` has shape ``[batch_size, num_samples, 3,
+        3]`` representing conical frustums for each interval.
+    """
+
+    batch_size = origins.shape[0]
+
+    # Uniformly spaced samples between 0 and 1 that will be mapped to the
+    # requested near/far bounds.
+    t_lin = torch.linspace(0.0, 1.0, num_samples + 1, device=origins.device)
+
+    if disparity:
+        # Sampling linearly in disparity rather than depth.
+        t_samples = 1.0 / (1.0 / near * (1.0 - t_lin) + 1.0 / far * t_lin)
+    else:
+        t_samples = near + (far - near) * t_lin
+
+    if randomized:
+        mids = 0.5 * (t_samples[..., 1:] + t_samples[..., :-1])
+        upper = torch.cat([mids, t_samples[..., -1:]], -1)
+        lower = torch.cat([t_samples[..., :1], mids], -1)
+        t_rand = torch.rand(batch_size, num_samples + 1, device=origins.device)
+        t_samples = lower + (upper - lower) * t_rand
+    else:
+        # Broadcast t_samples to make the returned shape consistent across rays.
+        t_samples = torch.broadcast_to(t_samples, [batch_size, num_samples + 1])
+
+    means, covs = cast_rays(t_samples, origins, directions, radii, ray_shape)
+    return t_samples, (means, covs)
 
 
 def sample_along_rays(origins, directions, radii, num_samples, near, far, randomized, disparity, ray_shape):
@@ -337,9 +387,20 @@ def integrated_pos_enc(means_covs, min_deg, max_deg, diagonal=True):
 
 def pos_enc(x, min_deg, max_deg, append_identity=True):
     """The positional encoding used by the original NeRF paper."""
-    
-    # === CODE START ===
-    pass
+    if max_deg <= min_deg:
+        raise ValueError("max_deg must be larger than min_deg")
+
+    scales = torch.tensor([2 ** i for i in range(min_deg, max_deg)],
+                          device=x.device,
+                          dtype=x.dtype)
+
+    xb = x.unsqueeze(-2) * scales.view(-1, 1)
+    emb = torch.cat([torch.sin(xb), torch.cos(xb)], dim=-2)
+    emb = rearrange(emb, "... L C -> ... (L C)")
+
+    if append_identity:
+        emb = torch.cat([x, emb], dim=-1)
+    return emb
 
 
 def volumetric_rendering(rgb, density, t_samples, dirs, white_bkgd):
@@ -357,8 +418,32 @@ def volumetric_rendering(rgb, density, t_samples, dirs, white_bkgd):
         weights: torch.Tensor, [batch_size, num_samples]
     """
     
-    # === CODE START ===
-    pass
+    dists = t_samples[..., 1:] - t_samples[..., :-1]  # [B, N]
+    # Account for non-unit ray directions by scaling distances with their norms.
+    dists = dists * torch.norm(dirs[..., None, :], dim=-1)
+
+    rgb = rgb.to(dists.dtype)
+    density = density.squeeze(-1)
+
+    # The midpoint of each interval for computing expected distance.
+    t_mid = 0.5 * (t_samples[..., :-1] + t_samples[..., 1:])
+
+    # Compute alpha compositing weights.
+    alpha = 1.0 - torch.exp(-density * dists)
+    accum_prod = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]),
+                                          1.0 - alpha + 1e-10], dim=-1),
+                               dim=-1)[..., :-1]
+    weights = alpha * accum_prod
+
+    # Rendering outputs.
+    comp_rgb = torch.sum(weights[..., None] * rgb, dim=-2)
+    distance = torch.sum(weights * t_mid, dim=-1)
+    acc = torch.sum(weights, dim=-1)
+
+    if white_bkgd:
+        comp_rgb = comp_rgb + (1.0 - acc)[..., None]
+
+    return comp_rgb, distance, acc, weights
 
 
 def rearrange_render_image(rays, chunk_size=4096):
