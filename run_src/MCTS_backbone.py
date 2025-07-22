@@ -105,15 +105,38 @@ class MCTS_Searcher:
 
     def _select(self, node: MCTS_Node, rollout_id: int) -> List[MCTS_Node]:
         "Find an unexplored descendent of `node`"
-        
-        # === CODE START ===
-        pass
+
+        path = []
+        cur_node = node
+        while True:
+            path.append(cur_node)
+
+            # stop if we haven't explored this node yet or it is terminal
+            if cur_node not in self.explored_nodes or cur_node.is_terminal():
+                return path
+
+            # expand dictionary entry if not already present
+            if cur_node not in self.parent2children:
+                return path
+
+            # choose an unexplored child if exists
+            unexplored = [c for c in self.parent2children[cur_node] if c not in self.explored_nodes]
+            if unexplored:
+                cur_node = random.choice(unexplored)
+                path.append(cur_node)
+                return path
+
+            # otherwise select child according to UCT and continue
+            cur_node = self._uct_select(cur_node, rollout_id)
 
     def _expand(self, node: MCTS_Node, rollout_id: int):
         "Update the `children` dict with the children of `node`"
-        
-        # === CODE START ===
-        pass
+
+        if node.is_terminal():
+            return
+
+        if node not in self.parent2children:
+            self.parent2children[node] = node.find_children(rollout_id)
 
     def _simulate(self, node: MCTS_Node, rollout_id: int) -> List[MCTS_Node]:
         "Returns the reward for a random simulation (to completion) of `node`"

@@ -771,9 +771,119 @@ class Reasoning_MCTS_Node(MCTS_Node):
         return f"{type2str[self.node_type]}-{self.id}"
 
     def _create_children(self):
-        
-        # === CODE START ===
-        pass
+        children = []
+
+        user_question = self.user_question
+        solution_trace = self.solution_trace
+        paraphrased = self.paraphrased
+
+        # Rephrase user question only from the root
+        if self.node_type is Node_Type.USER_QUESTION and not self.disable_a5:
+            rq_list, potential_list = self.generator.generate_rephrased_user_question(
+                user_question
+            )
+            for rq, pa in zip(rq_list, potential_list):
+                children.append(
+                    Reasoning_MCTS_Node(
+                        parent=self,
+                        depth=self.depth + 1,
+                        node_type=Node_Type.REPHRASED_USER_QUESTION,
+                        rephrased_user_question=rq,
+                        potential_answers=pa,
+                    )
+                )
+
+        # Determine hint for direct answer generation
+        hint = None
+        if self.node_type in [Node_Type.SUBQUESTION, Node_Type.RE_SUBANSWER]:
+            hint = make_hint(solution_trace, Node_Type.SUBQUESTION)
+        elif self.node_type is Node_Type.OST_STEP:
+            hint = make_hint(solution_trace, Node_Type.OST_STEP)
+
+        # Direct answer proposals
+        if self.node_type is not Node_Type.DIRECT_ANSWER:
+            da_list, val_list = self.generator.generate_direct_answers(
+                user_question=user_question, paraphrased=paraphrased, hint=hint
+            )
+            for da, v in zip(da_list, val_list):
+                children.append(
+                    Reasoning_MCTS_Node(
+                        parent=self,
+                        depth=self.depth + 1,
+                        node_type=Node_Type.DIRECT_ANSWER,
+                        direct_answer=da,
+                        node_value=v,
+                    )
+                )
+
+        # Generate new subquestions if this node is not a terminal subquestion
+        allow_subq = not (
+            self.node_type is Node_Type.SUBQUESTION
+            and reach_terminal_subquestion(self.subquestion, user_question)
+        )
+
+        if self.node_type is not Node_Type.DIRECT_ANSWER and allow_subq:
+            subq_list, suba_list, val_list, pot_list = self.generator.generate_subquestions(
+                user_question=user_question,
+                solution_trace=solution_trace,
+                paraphrased=paraphrased,
+            )
+            for sq, sa, v, pa in zip(subq_list, suba_list, val_list, pot_list):
+                children.append(
+                    Reasoning_MCTS_Node(
+                        parent=self,
+                        depth=self.depth + 1,
+                        node_type=Node_Type.SUBQUESTION,
+                        subquestion=sq,
+                        subanswer=sa,
+                        node_value=v,
+                        is_new_subquestion=True,
+                        potential_answers=pa,
+                    )
+                )
+
+        # Re-answer the previous subquestion
+        if self.node_type is Node_Type.SUBQUESTION and not reach_terminal_subquestion(
+            self.subquestion, user_question
+        ):
+            rs_list, val_list, pot_list = self.generator.generate_re_subanswers(
+                user_question=user_question,
+                solution_trace=solution_trace,
+                paraphrased=paraphrased,
+            )
+            for rs, v, pa in zip(rs_list, val_list, pot_list):
+                children.append(
+                    Reasoning_MCTS_Node(
+                        parent=self,
+                        depth=self.depth + 1,
+                        node_type=Node_Type.RE_SUBANSWER,
+                        re_subanswer=rs,
+                        node_value=v,
+                        potential_answers=pa,
+                    )
+                )
+
+        # One-step thought actions
+        if not self.disable_a1 and self.node_type is not Node_Type.DIRECT_ANSWER:
+            parent_is_subq = self.node_type in [Node_Type.SUBQUESTION, Node_Type.RE_SUBANSWER]
+            ost_list, pot_list = self.generator.generate_ost_step(
+                user_question=user_question,
+                solution_trace=solution_trace,
+                paraphrased=paraphrased,
+                parent_is_subquestion=parent_is_subq,
+            )
+            for ost, pa in zip(ost_list, pot_list):
+                children.append(
+                    Reasoning_MCTS_Node(
+                        parent=self,
+                        depth=self.depth + 1,
+                        node_type=Node_Type.OST_STEP,
+                        ost_step=ost,
+                        potential_answers=pa,
+                    )
+                )
+
+        return children
 
     def is_valid_leaf_node(self):
         #! a valid solution can only be in SUBQUESTION type or DIRECT_ANSWER type
